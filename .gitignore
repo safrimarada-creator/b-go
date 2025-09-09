@@ -13,6 +13,9 @@
 # testing
 /coverage
 
+# Dalam file .gitignore
+client_secret_484274253678-bq5rhd137u3sr70sm2m755ftcb7kliad.apps.googleusercontent.com.json
+
 # next.js
 /.next/
 /out/
