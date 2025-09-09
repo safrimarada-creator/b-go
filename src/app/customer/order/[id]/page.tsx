@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import SidebarCustomer from "@/components/SidebarCustomer";
-import { db } from "@/lib/firebase";
+import { db, auth } from "@/lib/firebase";
 import { doc, onSnapshot, Timestamp } from "firebase/firestore";
 import type { LatLng } from "@/lib/driverPresence";
 import {
@@ -19,17 +19,44 @@ import {
   User2,
 } from "lucide-react";
 import type { OrderDoc, VehicleType } from "@/types/order";
+import { onAuthStateChanged } from "firebase/auth";
+
 const OSMMapView = dynamic(() => import("@/components/OSMMapView"), {
   ssr: false,
 });
 
+/** Tunggu Firebase Auth siap, supaya rules tidak menolak ketika subscribe terlalu cepat */
+function useAuthReady() {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, () => setReady(true));
+    return () => unsub();
+  }, []);
+  return ready;
+}
+
+/** Type guard: order yang berbasis rute (ride / delivery) */
+function isRouteOrder(o: OrderDoc | null | undefined): o is OrderDoc & {
+  service: "ride" | "delivery";
+  pickup?: { address?: string; coords?: LatLng | null };
+  destinations?: Array<{ address?: string; coords?: LatLng | null }>;
+  route?: { distanceText?: string; durationText?: string };
+  vehicleType?: VehicleType;
+} {
+  if (!o) return false;
+  const s = (o as any).service;
+  return s === "ride" || s === "delivery";
+}
+
 export default function CustomerOrderDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const authReady = useAuthReady();
+
   const [order, setOrder] = useState<OrderDoc | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!id) return;
+    if (!id || !authReady) return;
     const ref = doc(db, "orders", id);
     const unsub = onSnapshot(
       ref,
@@ -45,16 +72,35 @@ export default function CustomerOrderDetailPage() {
       (e) => setErr(String(e?.message || e))
     );
     return () => unsub();
-  }, [id]);
+  }, [id, authReady]);
 
-  const waypoints = useMemo(
-    () => (order?.destinations || []).map((d) => d.coords || null),
-    [order?.destinations]
-  );
+  // Derivasi aman untuk map & ringkasan
+  const pickupCoords: LatLng | null = isRouteOrder(order)
+    ? order.pickup?.coords || null
+    : null;
 
-  const canDrawRoute = Boolean(
-    order?.pickup?.coords && waypoints.some(Boolean)
-  );
+  const waypoints = useMemo<(LatLng | null)[]>(() => {
+    if (!isRouteOrder(order)) return [];
+    return (order.destinations || []).map((d) => d.coords || null);
+  }, [order]);
+
+  const canDrawRoute = Boolean(pickupCoords && waypoints.some(Boolean));
+
+  const vehicle: VehicleType =
+    (isRouteOrder(order) && (order.vehicleType as VehicleType)) || "bike";
+
+  const routeDistanceText = isRouteOrder(order)
+    ? order.route?.distanceText || "-"
+    : "-";
+  const routeDurationText = isRouteOrder(order)
+    ? order.route?.durationText || "-"
+    : "-";
+  const pickupAddress = isRouteOrder(order)
+    ? order.pickup?.address || "-"
+    : "-";
+
+  const mapCenter: LatLng = pickupCoords ||
+    order?.driver?.coords || { lat: -1.25, lng: 124.45 };
 
   return (
     <div className="flex flex-col md:flex-row min-h-screen bg-gray-50">
@@ -78,15 +124,12 @@ export default function CustomerOrderDetailPage() {
         <div className="mb-4 rounded-xl overflow-hidden border relative z-0">
           <OSMMapView
             variant="streets"
-            center={order?.pickup?.coords || { lat: -1.25, lng: 124.45 }}
-            pickup={order?.pickup?.coords || null}
-            waypoints={(order?.destinations || []).map((d) => d.coords || null)}
-            drawRoute={Boolean(
-              order?.pickup?.coords &&
-                (order?.destinations || []).some((d) => d.coords)
-            )}
+            center={mapCenter}
+            pickup={pickupCoords}
+            waypoints={waypoints}
+            drawRoute={canDrawRoute}
             driverMarker={order?.driver?.coords || null}
-            driverVehicle={order?.vehicleType || "bike"} // ← kirim jenis kendaraan
+            driverVehicle={vehicle}
           />
         </div>
 
@@ -94,17 +137,17 @@ export default function CustomerOrderDetailPage() {
         <div className="grid sm:grid-cols-3 gap-4">
           <Info
             label="Jarak"
-            value={order?.route?.distanceText || "-"}
+            value={routeDistanceText}
             icon={<Route className="w-4 h-4" />}
           />
           <Info
             label="Estimasi Waktu"
-            value={order?.route?.durationText || "-"}
+            value={routeDurationText}
             icon={<Clock className="w-4 h-4" />}
           />
           <Info
             label="Penjemputan"
-            value={order?.pickup?.address || "-"}
+            value={pickupAddress}
             icon={<MapPin className="w-4 h-4" />}
           />
         </div>
@@ -228,7 +271,7 @@ function StatusTimeline({ order }: { order: OrderDoc | null }) {
       key: "driver_arriving",
       label: "Menuju Penjemputan",
       icon: <Navigation className="w-4 h-4" />,
-      at: order?.driverUpdatedAt, // waktu terakhir posisi driver tersinkron
+      at: order?.driverUpdatedAt,
     },
     {
       key: "ongoing",
@@ -267,8 +310,6 @@ function StatusTimeline({ order }: { order: OrderDoc | null }) {
               >
                 {done ? (
                   <CheckCircle2 className="w-4 h-4" />
-                ) : active ? (
-                  <Circle className="w-4 h-4" />
                 ) : (
                   <Circle className="w-4 h-4" />
                 )}
@@ -284,7 +325,6 @@ function StatusTimeline({ order }: { order: OrderDoc | null }) {
                 </div>
               </div>
               <div className="text-xs text-gray-500 hidden sm:block">
-                {/* ikon kontekstual kecil di sisi kanan */}
                 <span className="inline-flex items-center gap-1">
                   {st.icon}
                 </span>

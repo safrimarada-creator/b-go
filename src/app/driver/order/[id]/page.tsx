@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import SidebarDriver from "@/components/SidebarDriver";
 import { db, auth } from "@/lib/firebase";
@@ -25,15 +25,37 @@ import {
   Flag,
 } from "lucide-react";
 import type { OrderDoc, VehicleType } from "@/types/order";
-import { useDriverProfile } from "@/lib/useDriverProfile"; // ⬅️ ambil kendaraan driver
+import { useDriverProfile } from "@/lib/useDriverProfile";
+import { onAuthStateChanged } from "firebase/auth";
 
 const OSMMapView = dynamic(() => import("@/components/OSMMapView"), {
   ssr: false,
 });
 
+function useAuthReady() {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, () => setReady(true));
+    return () => unsub();
+  }, []);
+  return ready;
+}
+
+function isRouteOrder(o: OrderDoc | null | undefined): o is OrderDoc & {
+  service: "ride" | "delivery";
+  pickup?: { address?: string; coords?: LatLng | null };
+  destinations?: Array<{ address?: string; coords?: LatLng | null }>;
+  route?: { distanceText?: string; durationText?: string };
+  vehicleType?: VehicleType;
+} {
+  if (!o) return false;
+  const s = (o as any).service;
+  return s === "ride" || s === "delivery";
+}
+
 export default function DriverOrderDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const router = useRouter();
+  const authReady = useAuthReady();
 
   const { profile: driverProfile } = useDriverProfile(); // { vehicleType, ... }
   const { myLoc } = useDriverPresence();
@@ -43,9 +65,9 @@ export default function DriverOrderDetailPage() {
   const [saving, setSaving] = useState(false);
   const [accepting, setAccepting] = useState(false);
 
-  // subscribe order
+  // subscribe order setelah auth siap
   useEffect(() => {
-    if (!id) return;
+    if (!id || !authReady) return;
     const ref = doc(db, "orders", id);
     const unsub = onSnapshot(
       ref,
@@ -61,18 +83,42 @@ export default function DriverOrderDetailPage() {
       (e) => setErr(String(e?.message || e))
     );
     return () => unsub();
-  }, [id]);
+  }, [id, authReady]);
 
-  const waypoints = useMemo(
-    () => (order?.destinations || []).map((d) => d.coords || null),
-    [order?.destinations]
-  );
+  // derivasi aman untuk map
+  const pickupCoords: LatLng | null = isRouteOrder(order)
+    ? order.pickup?.coords || null
+    : null;
+
+  const waypoints: (LatLng | null)[] = useMemo(() => {
+    if (!isRouteOrder(order)) return [];
+    return (order.destinations || []).map((d) => d.coords || null);
+  }, [order]);
+
+  const canDrawRoute = Boolean(pickupCoords && waypoints.some(Boolean));
+
+  const vehicle: VehicleType =
+    (isRouteOrder(order) && (order.vehicleType as VehicleType)) || "bike";
+
+  const routeDistanceText = isRouteOrder(order)
+    ? order.route?.distanceText || "-"
+    : "-";
+  const routeDurationText = isRouteOrder(order)
+    ? order.route?.durationText || "-"
+    : "-";
+  const pickupAddress = isRouteOrder(order)
+    ? order.pickup?.address || "-"
+    : "-";
+
+  const mapCenter: LatLng = pickupCoords ||
+    order?.driver?.coords ||
+    myLoc || { lat: -1.25, lng: 124.45 };
 
   const myUid = auth.currentUser?.uid || null;
   const iAmAssigned =
     myUid && order?.driver?.uid && order.driver.uid === myUid ? true : false;
 
-  // ---- Accept (transaction + vehicleType check) ----
+  // Accept (transaction + cek vehicleType)
   async function acceptOrder() {
     if (!id) return;
     if (!auth.currentUser?.uid) {
@@ -92,8 +138,10 @@ export default function DriverOrderDetailPage() {
         }
 
         const driverV: VehicleType = driverProfile?.vehicleType || "bike";
-        const orderV: VehicleType = (data.vehicleType as VehicleType) || "bike";
-        if (orderV !== driverV) {
+        const orderV: VehicleType =
+          (isRouteOrder(data) && (data.vehicleType as VehicleType)) || "bike";
+
+        if (isRouteOrder(data) && orderV !== driverV) {
           throw new Error(
             `Tipe kendaraan tidak cocok (order: ${orderV}, Anda: ${driverV})`
           );
@@ -109,16 +157,13 @@ export default function DriverOrderDetailPage() {
           assignedAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
           driver: {
-            ...(data.driver || {}),
+            ...(data as any).driver,
             uid,
             name,
             email,
-            // coords tetap/null; akan dimirror oleh hook presence
           },
         });
       });
-
-      // sukses → iAmAssigned akan true setelah snapshot update
     } catch (e: any) {
       alert(e?.message || String(e));
     } finally {
@@ -126,7 +171,7 @@ export default function DriverOrderDetailPage() {
     }
   }
 
-  // ---- Mirror lokasi driver → orders/{id}.driver.coords (throttle) ----
+  // Mirror lokasi driver → orders/{id}.driver.coords
   const lastMirrorRef = useRef(0);
   useEffect(() => {
     if (!id || !myLoc || !order) return;
@@ -135,13 +180,13 @@ export default function DriverOrderDetailPage() {
     if (!["assigned", "driver_arriving", "ongoing"].includes(s)) return;
 
     const now = Date.now();
-    if (now - lastMirrorRef.current < 2000) return;
+    if (now - lastMirrorRef.current < 2000) return; // throttle 2s
     lastMirrorRef.current = now;
 
     const ref = doc(db, "orders", id);
     updateDoc(ref, {
       driver: {
-        ...(order.driver || {}),
+        ...(order as any).driver,
         uid: myUid,
         coords: { lat: myLoc.lat, lng: myLoc.lng },
       },
@@ -151,7 +196,7 @@ export default function DriverOrderDetailPage() {
     });
   }, [id, myLoc, order, iAmAssigned, myUid]);
 
-  // ---- Progress status ----
+  // Progress status
   async function goTo(next: "driver_arriving" | "ongoing" | "completed") {
     if (!id || !order) return;
     if (!iAmAssigned) {
@@ -163,7 +208,6 @@ export default function DriverOrderDetailPage() {
       const ref = doc(db, "orders", id);
       await updateDoc(ref, {
         status: next,
-        // opsional: startedAt/completedAt bisa ditambahkan di sini
         ...(next === "ongoing" ? { startedAt: serverTimestamp() } : {}),
         ...(next === "completed" ? { completedAt: serverTimestamp() } : {}),
         updatedAt: serverTimestamp(),
@@ -175,7 +219,6 @@ export default function DriverOrderDetailPage() {
     }
   }
 
-  // UI helper tombol aksi
   function renderNextActions() {
     const s = order?.status || "";
 
@@ -241,11 +284,10 @@ export default function DriverOrderDetailPage() {
     return null;
   }
 
-  // jarak driver → pickup
   const distToPickup = useMemo(() => {
-    if (!myLoc || !order?.pickup?.coords) return null;
+    if (!myLoc || !isRouteOrder(order) || !order.pickup?.coords) return null;
     return haversine(myLoc, order.pickup.coords);
-  }, [myLoc, order?.pickup?.coords]);
+  }, [myLoc, order]);
 
   return (
     <div className="flex flex-col md:flex-row min-h-screen bg-gray-50">
@@ -265,18 +307,16 @@ export default function DriverOrderDetailPage() {
           </div>
         )}
 
+        {/* Peta */}
         <div className="mb-4 rounded-xl overflow-hidden border">
           <OSMMapView
             variant="streets"
-            center={order?.pickup?.coords || { lat: -1.25, lng: 124.45 }}
-            pickup={order?.pickup?.coords || null}
-            waypoints={(order?.destinations || []).map((d) => d.coords || null)}
-            drawRoute={Boolean(
-              order?.pickup?.coords &&
-                (order?.destinations || []).some((d) => d.coords)
-            )}
+            center={mapCenter}
+            pickup={pickupCoords}
+            waypoints={waypoints}
+            drawRoute={canDrawRoute}
             driverMarker={order?.driver?.coords || myLoc || null}
-            driverVehicle={(order?.vehicleType as VehicleType) ?? "bike"}
+            driverVehicle={vehicle}
           />
         </div>
 
@@ -284,12 +324,12 @@ export default function DriverOrderDetailPage() {
           <Info label="Status" value={order?.status || "-"} />
           <Info
             label="Jarak"
-            value={order?.route?.distanceText || "-"}
+            value={routeDistanceText}
             icon={<Route className="w-4 h-4" />}
           />
           <Info
             label="Estimasi Waktu"
-            value={order?.route?.durationText || "-"}
+            value={routeDurationText}
             icon={<Clock className="w-4 h-4" />}
           />
         </div>
@@ -298,7 +338,7 @@ export default function DriverOrderDetailPage() {
           <div className="text-sm font-semibold">Penjemputan</div>
           <div className="text-sm flex items-center gap-2">
             <MapPin className="w-4 h-4" />
-            <span>{order?.pickup?.address || "-"}</span>
+            <span>{pickupAddress}</span>
           </div>
           {distToPickup != null && (
             <div className="text-xs text-gray-600">

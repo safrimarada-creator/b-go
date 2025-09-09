@@ -4,7 +4,7 @@ import SidebarDriver from "@/components/SidebarDriver";
 import { useDriverProfile } from "@/lib/useDriverProfile";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { db } from "@/lib/firebase";
+import { db, auth } from "@/lib/firebase";
 import {
   collection,
   onSnapshot,
@@ -14,38 +14,51 @@ import {
   limit,
 } from "firebase/firestore";
 import type { LatLng } from "@/lib/geo";
-import { haversine, formatDistance } from "@/lib/geo";
 import { Clock, Route, ArrowRight, Car, Bike } from "lucide-react";
+import { onAuthStateChanged } from "firebase/auth";
 
 type OrderListItem = {
   id: string;
   status: string;
-  service: string;
+  service: "ride" | "delivery";
   vehicleType?: "bike" | "car2" | "car3";
   pickup: { address: string; coords?: LatLng | null };
   destinations: { address: string; coords?: LatLng | null }[];
   route?: { distanceText?: string; durationText?: string };
 };
 
+function useAuthReady() {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, () => setReady(true));
+    return () => unsub();
+  }, []);
+  return ready;
+}
+
 export default function DriverJobsPage() {
+  const authReady = useAuthReady();
   const { profile, loading: loadingProfile } = useDriverProfile();
   const [items, setItems] = useState<OrderListItem[]>([]);
   const [loading, setLoading] = useState(true);
 
   // subscribe jobs sesuai vehicleType driver
   useEffect(() => {
-    if (loadingProfile) return;
+    if (!authReady || loadingProfile) return;
     const vt = profile?.vehicleType || "bike";
 
     const ref = collection(db, "orders");
-    // butuh index komposit: status ==, vehicleType ==, createdAt desc
+    // Syarat rules: driver hanya boleh baca 'searching' untuk service ride/delivery.
+    // Maka query harus membatasi service agar tidak kena permission-denied.
     const q = query(
       ref,
       where("status", "==", "searching"),
+      where("service", "in", ["ride", "delivery"]),
       where("vehicleType", "==", vt),
       orderBy("createdAt", "desc"),
       limit(50)
     );
+
     const unsub = onSnapshot(
       q,
       (snap) => {
@@ -60,10 +73,9 @@ export default function DriverJobsPage() {
       }
     );
     return () => unsub();
-  }, [loadingProfile, profile?.vehicleType]);
+  }, [authReady, loadingProfile, profile?.vehicleType]);
 
-  // jarak ke pickup (opsional)
-  const sorted = useMemo(() => items, [items]); // (bisa diurut jarak bila kamu punya myLoc)
+  const sorted = useMemo(() => items, [items]);
 
   return (
     <div className="flex flex-col md:flex-row min-h-screen bg-gray-50">

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import SidebarAdmin from "@/components/SidebarAdmin";
+import ImageUploader from "@/components/ImageUploader";
 
 import { db } from "@/lib/firebase";
 import {
@@ -240,15 +241,10 @@ export default function AdminMerchantEditPage() {
               </div>
 
               <div>
-                <label className="label-xs flex items-center gap-2">
-                  <ImageIcon className="w-4 h-4" />
-                  Foto/Logo (URL)
-                </label>
-                <input
-                  className="input-sm w-full"
-                  value={photoUrl}
-                  onChange={(e) => setPhotoUrl(e.target.value)}
-                  placeholder="https://…"
+                <ImageUploader
+                  value={photoUrl || null}
+                  onChange={(url) => setPhotoUrl(url || "")}
+                  pathPrefix={`merchants/${id && id !== "new" ? id : "tmp"}`}
                 />
               </div>
 
