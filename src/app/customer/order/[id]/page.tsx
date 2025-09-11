@@ -36,16 +36,16 @@ function useAuthReady() {
 }
 
 /** Type guard: order yang berbasis rute (ride / delivery) */
-function isRouteOrder(o: OrderDoc | null | undefined): o is OrderDoc & {
-  service: "ride" | "delivery";
+function hasRouteFields(o: OrderDoc | null | undefined): o is OrderDoc & {
   pickup?: { address?: string; coords?: LatLng | null };
   destinations?: Array<{ address?: string; coords?: LatLng | null }>;
   route?: { distanceText?: string; durationText?: string };
   vehicleType?: VehicleType;
 } {
   if (!o) return false;
-  const s = (o as any).service;
-  return s === "ride" || s === "delivery";
+  const p = (o as any).pickup;
+  const ds = (o as any).destinations;
+  return !!p?.coords && Array.isArray(ds) && ds.length > 0;
 }
 
 export default function CustomerOrderDetailPage() {
@@ -75,27 +75,27 @@ export default function CustomerOrderDetailPage() {
   }, [id, authReady]);
 
   // Derivasi aman untuk map & ringkasan
-  const pickupCoords: LatLng | null = isRouteOrder(order)
+  const pickupCoords: LatLng | null = hasRouteFields(order)
     ? order.pickup?.coords || null
     : null;
 
   const waypoints = useMemo<(LatLng | null)[]>(() => {
-    if (!isRouteOrder(order)) return [];
+    if (!hasRouteFields(order)) return [];
     return (order.destinations || []).map((d) => d.coords || null);
   }, [order]);
 
   const canDrawRoute = Boolean(pickupCoords && waypoints.some(Boolean));
 
   const vehicle: VehicleType =
-    (isRouteOrder(order) && (order.vehicleType as VehicleType)) || "bike";
+    (hasRouteFields(order) && (order.vehicleType as VehicleType)) || "bike";
 
-  const routeDistanceText = isRouteOrder(order)
+  const routeDistanceText = hasRouteFields(order)
     ? order.route?.distanceText || "-"
     : "-";
-  const routeDurationText = isRouteOrder(order)
+  const routeDurationText = hasRouteFields(order)
     ? order.route?.durationText || "-"
     : "-";
-  const pickupAddress = isRouteOrder(order)
+  const pickupAddress = hasRouteFields(order)
     ? order.pickup?.address || "-"
     : "-";
 

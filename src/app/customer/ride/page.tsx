@@ -1,5 +1,5 @@
 "use client";
-
+import { callMatch } from "@/lib/callMatch";
 import SidebarCustomer from "@/components/SidebarCustomer";
 import dynamic from "next/dynamic";
 import AutocompleteInputOSM from "@/components/AutocompleteInputOSM";
@@ -263,6 +263,13 @@ export default function RidePage() {
     };
 
     const ref = await addDoc(collection(db, "orders"), payload);
+
+    try {
+      await callMatch(ref.id);
+    } catch (e: any) {
+      console.warn("match-driver failed:", e?.message || e);
+    }
+
     router.push(`/customer/order/${ref.id}`);
   };
 

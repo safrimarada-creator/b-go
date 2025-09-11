@@ -1,8 +1,8 @@
+// src/app/driver/jobs/page.tsx
 "use client";
 
 import SidebarDriver from "@/components/SidebarDriver";
-import { useDriverProfile } from "@/lib/useDriverProfile";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { db, auth } from "@/lib/firebase";
 import {
@@ -13,122 +13,81 @@ import {
   where,
   limit,
 } from "firebase/firestore";
-import type { LatLng } from "@/lib/geo";
-import { Clock, Route, ArrowRight, Car, Bike } from "lucide-react";
-import { onAuthStateChanged } from "firebase/auth";
+import { Clock, Route, ArrowRight, Car } from "lucide-react";
 
-type OrderListItem = {
+type MyTask = {
   id: string;
-  status: string;
-  service: "ride" | "delivery";
-  vehicleType?: "bike" | "car2" | "car3";
-  pickup: { address: string; coords?: LatLng | null };
-  destinations: { address: string; coords?: LatLng | null }[];
+  status: "assigned" | "driver_arriving" | "ongoing" | "completed" | string;
+  service?: string;
+  pickup?: { address?: string };
+  destinations?: Array<{ address?: string }>;
   route?: { distanceText?: string; durationText?: string };
 };
 
-function useAuthReady() {
-  const [ready, setReady] = useState(false);
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, () => setReady(true));
-    return () => unsub();
-  }, []);
-  return ready;
-}
-
 export default function DriverJobsPage() {
-  const authReady = useAuthReady();
-  const { profile, loading: loadingProfile } = useDriverProfile();
-  const [items, setItems] = useState<OrderListItem[]>([]);
+  const [items, setItems] = useState<MyTask[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // subscribe jobs sesuai vehicleType driver
   useEffect(() => {
-    if (!authReady || loadingProfile) return;
-    const vt = profile?.vehicleType || "bike";
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
 
     const ref = collection(db, "orders");
-    // Syarat rules: driver hanya boleh baca 'searching' untuk service ride/delivery.
-    // Maka query harus membatasi service agar tidak kena permission-denied.
+    // tugas saya yang belum selesai
     const q = query(
       ref,
-      where("status", "==", "searching"),
-      where("service", "in", ["ride", "delivery"]),
-      where("vehicleType", "==", vt),
-      orderBy("createdAt", "desc"),
+      where("driver.uid", "==", uid),
+      where("status", "!=", "completed"),
+      orderBy("status"), // Firestore butuh orderBy utk "!="
+      orderBy("updatedAt", "desc"),
       limit(50)
     );
 
     const unsub = onSnapshot(
       q,
       (snap) => {
-        const arr: OrderListItem[] = [];
+        const arr: MyTask[] = [];
         snap.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
         setItems(arr);
         setLoading(false);
       },
       (e) => {
-        console.error("jobs onSnapshot error:", e);
+        console.error("driver tasks error:", e);
         setLoading(false);
       }
     );
     return () => unsub();
-  }, [authReady, loadingProfile, profile?.vehicleType]);
-
-  const sorted = useMemo(() => items, [items]);
+  }, []);
 
   return (
     <div className="flex flex-col md:flex-row min-h-screen bg-gray-50">
       <SidebarDriver />
       <main className="flex-1 p-6 pt-20 md:pt-6 md:ml-64">
         <div className="mb-3 flex items-center justify-between">
-          <h1 className="text-2xl font-bold">Pekerjaan Tersedia</h1>
-          {!loadingProfile && (
-            <div className="text-sm text-gray-600 inline-flex items-center gap-2">
-              <span>Jenis kendaraan:</span>
-              <span className="inline-flex items-center gap-1 font-medium">
-                {profile?.vehicleType === "bike" ? (
-                  <>
-                    <Bike className="w-4 h-4" /> Motor
-                  </>
-                ) : profile?.vehicleType === "car2" ? (
-                  <>
-                    <Car className="w-4 h-4" /> Mobil (2 kursi)
-                  </>
-                ) : (
-                  <>
-                    <Car className="w-4 h-4" /> Mobil (3 kursi)
-                  </>
-                )}
-              </span>
-            </div>
-          )}
+          <h1 className="text-2xl font-bold">Tugas Saya</h1>
         </div>
 
         {loading ? (
           <div className="text-sm text-gray-600">Memuat…</div>
-        ) : sorted.length === 0 ? (
-          <div className="text-sm text-gray-600">
-            Belum ada order cocok untuk tipe kendaraanmu.
-          </div>
+        ) : items.length === 0 ? (
+          <div className="text-sm text-gray-600">Belum ada tugas.</div>
         ) : (
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {sorted.map((o) => (
+            {items.map((o) => (
               <div
                 key={o.id}
                 className="bg-white border rounded-xl p-4 shadow-sm"
               >
                 <div className="text-xs text-gray-500 mb-1">
-                  {o.service?.toUpperCase() || "RIDE"} •{" "}
-                  {o.vehicleType?.toUpperCase()}
+                  {(o.service || "ride").toUpperCase()} • {o.status}
                 </div>
                 <div className="font-semibold text-sm">
-                  {o.pickup?.address || "Penjemputan tidak diketahui"}
+                  {o.pickup?.address || "-"}
                 </div>
                 <div className="text-xs text-gray-600 mt-1 line-clamp-2">
-                  → {o.destinations?.[0]?.address || "Tujuan 1"}
-                  {o.destinations?.length > 1
-                    ? ` (+${o.destinations.length - 1} tujuan lain)`
+                  → {o.destinations?.[0]?.address || "—"}
+                  {o.destinations && o.destinations.length > 1
+                    ? ` (+${o.destinations.length - 1} tujuan)`
                     : ""}
                 </div>
 
@@ -149,7 +108,7 @@ export default function DriverJobsPage() {
                   href={`/driver/order/${o.id}`}
                   className="mt-3 inline-flex items-center gap-2 px-3 py-2 rounded-md bg-emerald-600 text-white text-sm hover:bg-emerald-700"
                 >
-                  Buka & Ambil
+                  Buka
                   <ArrowRight className="w-4 h-4" />
                 </Link>
               </div>

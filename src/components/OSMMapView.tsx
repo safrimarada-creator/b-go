@@ -7,7 +7,6 @@ import {
   TileLayer,
   Marker,
   Polyline,
-  CircleMarker,
   useMap,
   useMapEvent,
 } from "react-leaflet";
@@ -15,17 +14,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import type { LatLng } from "@/lib/osm";
 
-// Default icon (untuk pickup/waypoint)
-const DefaultIcon = L.icon({
-  iconUrl: "/leaflet/marker-icon.png",
-  iconRetinaUrl: "/leaflet/marker-icon-2x.png",
-  shadowUrl: "/leaflet/marker-shadow.png",
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-});
-L.Marker.prototype.options.icon = DefaultIcon;
-
-// 🔹 ikon kendaraan driver
+/* =================== Ikon Driver =================== */
 const DriverIcons: Record<"bike" | "car2" | "car3", L.Icon> = {
   bike: L.icon({
     iconUrl: "/icons/driver-bike.svg",
@@ -44,20 +33,54 @@ const DriverIcons: Record<"bike" | "car2" | "car3", L.Icon> = {
   }),
 };
 
+/* =================== Pin SVG Berwarna =================== */
+function makePin(color: string, label?: string) {
+  const html = `
+  <svg width="36" height="36" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+    <!-- badan pin -->
+    <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"
+      fill="${color}" stroke="white" stroke-width="2"/>
+    <!-- lingkaran tengah -->
+    <circle cx="12" cy="9" r="4" fill="white"/>
+    ${
+      label
+        ? `<text x="12" y="10.5" text-anchor="middle" font-size="7" font-weight="700" fill="#111827">${label}</text>`
+        : ""
+    }
+  </svg>`;
+  return L.divIcon({
+    className: "bgo-pin",
+    html,
+    iconSize: [36, 36],
+    iconAnchor: [18, 36], // ujung pin tepat di titik koordinat
+    popupAnchor: [0, -32],
+  });
+}
+
+/* =================== Props =================== */
 type Props = {
-  variant: "streets" | "satellite";
+  variant?: "streets" | "satellite";
   center: LatLng;
-  pickup: LatLng | null;
-  waypoints: (LatLng | null)[];
+
+  // pickup & waypoint
+  pickup?: LatLng | null;
+  waypoints?: (LatLng | null)[];
   drawRoute?: boolean;
 
-  // ✅ posisi & jenis kendaraan driver
+  // driver (opsional)
   driverMarker?: LatLng | null;
   driverVehicle?: "bike" | "car2" | "car3";
 
+  // interaksi
   onMapClick?: (coords: LatLng) => void;
   onPickupDrag?: (coords: LatLng) => void;
   onWaypointDrag?: (index: number, coords: LatLng) => void;
+
+  // warna pin (opsional)
+  pickupPinColor?: string; // default hijau
+  destPinColor?: string; // default merah
+
+  // info rute (opsional)
   onRouteComputed?: (info: {
     distanceText: string;
     durationText: string;
@@ -68,6 +91,7 @@ type Props = {
   height?: number;
 };
 
+/* =================== Util kecil =================== */
 function humanizeDistance(m: number) {
   if (m < 1000) return `${m.toFixed(0)} m`;
   return `${(m / 1000).toFixed(2)} km`;
@@ -80,14 +104,15 @@ function humanizeDuration(s: number) {
   return r ? `${h} j ${r} mnt` : `${h} j`;
 }
 
+/* =================== Fit Bounds =================== */
 function FitBounds({
   pickup,
   waypoints,
   driver,
 }: {
-  pickup: LatLng | null;
-  waypoints: (LatLng | null)[];
-  driver: LatLng | null;
+  pickup: LatLng | null | undefined;
+  waypoints: (LatLng | null | undefined)[];
+  driver: LatLng | null | undefined;
 }) {
   const map = useMap();
   const pts = useMemo(() => {
@@ -107,6 +132,7 @@ function FitBounds({
   return null;
 }
 
+/* =================== Map Click Catcher =================== */
 function MapClickCatcher({ onClick }: { onClick?: (c: LatLng) => void }) {
   useMapEvent("click", (e) => {
     onClick?.({ lat: e.latlng.lat, lng: e.latlng.lng });
@@ -114,39 +140,41 @@ function MapClickCatcher({ onClick }: { onClick?: (c: LatLng) => void }) {
   return null;
 }
 
+/* =================== Marker Draggable =================== */
 function DraggableMarker({
   position,
   onDrag,
   tooltip,
+  icon,
 }: {
   position: LatLng;
   onDrag: (c: LatLng) => void;
   tooltip?: string;
+  icon?: L.Icon | L.DivIcon;
 }) {
   const [pos, setPos] = useState(position);
   useEffect(() => setPos(position), [position]);
-  const ref = useRef<L.Marker>(null);
 
   return (
     <Marker
       position={[pos.lat, pos.lng]}
       draggable
+      icon={icon}
+      title={tooltip}
       eventHandlers={{
-        dragend: () => {
-          const p = ref.current?.getLatLng();
-          if (p) {
-            const c = { lat: p.lat, lng: p.lng };
-            setPos(c);
-            onDrag(c);
-          }
+        dragend: (e: L.LeafletEvent) => {
+          const m = e.target as L.Marker;
+          const ll = m.getLatLng();
+          const c = { lat: ll.lat, lng: ll.lng };
+          setPos(c);
+          onDrag(c);
         },
       }}
-      ref={ref as any}
-      title={tooltip}
     />
   );
 }
 
+/* =================== OSRM Route =================== */
 async function osrmRoute(points: LatLng[]): Promise<{
   geometry: LatLng[];
   distance: number;
@@ -167,11 +195,12 @@ async function osrmRoute(points: LatLng[]): Promise<{
   return { geometry, distance: route.distance, duration: route.duration };
 }
 
+/* =================== Komponen Utama =================== */
 export default function OSMMapView({
-  variant,
+  variant = "streets",
   center,
-  pickup,
-  waypoints,
+  pickup = null,
+  waypoints = [],
   drawRoute = true,
   driverMarker = null,
   driverVehicle = "bike",
@@ -179,10 +208,23 @@ export default function OSMMapView({
   onPickupDrag,
   onWaypointDrag,
   onRouteComputed,
+  pickupPinColor = "#10B981", // emerald-500
+  destPinColor = "#EF4444", // red-500
   height = 320,
 }: Props) {
   const [routeLine, setRouteLine] = useState<LatLng[] | null>(null);
 
+  // icons
+  const pickupIcon = useMemo(
+    () => makePin(pickupPinColor, "P"),
+    [pickupPinColor]
+  );
+  const destIconFor = useMemo(
+    () => (i: number) => makePin(destPinColor, String(i + 1)),
+    [destPinColor]
+  );
+
+  // hitung rute via OSRM
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -244,16 +286,17 @@ export default function OSMMapView({
           driver={driverMarker}
         />
 
-        {/* pickup */}
+        {/* pickup (hijau) */}
         {pickup && (
           <DraggableMarker
             position={pickup}
             onDrag={(c) => onPickupDrag?.(c)}
             tooltip="Penjemputan"
+            icon={pickupIcon}
           />
         )}
 
-        {/* tujuan */}
+        {/* tujuan (merah + nomor urut) */}
         {waypoints.map((wp, idx) =>
           wp ? (
             <DraggableMarker
@@ -261,6 +304,7 @@ export default function OSMMapView({
               position={wp}
               onDrag={(c) => onWaypointDrag?.(idx, c)}
               tooltip={`Tujuan #${idx + 1}`}
+              icon={destIconFor(idx)}
             />
           ) : null
         )}
@@ -271,6 +315,8 @@ export default function OSMMapView({
             position={[driverMarker.lat, driverMarker.lng]}
             icon={DriverIcons[driverVehicle]}
             title="Driver"
+            // zIndexOffset lebih tinggi dari pin tujuan
+            zIndexOffset={600}
           />
         )}
 

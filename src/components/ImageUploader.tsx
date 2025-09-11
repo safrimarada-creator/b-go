@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { storage } from "@/lib/firebase";
 import { ref, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 import { Camera, Image as ImageIcon, Trash2, Upload } from "lucide-react";
-
+import { auth } from "@/lib/firebase";
 type Props = {
   value: string | null; // downloadURL tersimpan
   onChange: (url: string | null) => void;
@@ -64,7 +64,9 @@ export default function ImageUploader({
     const blob = await compressImage(file);
 
     // upload
+
     const filename = `${Date.now()}.jpg`;
+    const uid = auth.currentUser?.uid || "public";
     const storageRef = ref(storage, `${pathPrefix}/${filename}`);
     const task = uploadBytesResumable(storageRef, blob, {
       contentType: "image/jpeg",

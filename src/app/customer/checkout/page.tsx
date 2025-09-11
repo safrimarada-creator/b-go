@@ -1,7 +1,9 @@
+// src/app/customer/checkout/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useState, useEffect, useMemo } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import dynamic from "next/dynamic";
 import SidebarCustomer from "@/components/SidebarCustomer";
 import { db, auth } from "@/lib/firebase";
 import {
@@ -11,100 +13,173 @@ import {
   collection,
   serverTimestamp,
 } from "firebase/firestore";
-import type { Merchant } from "@/types/merchant";
 import { useCart } from "@/lib/cart";
-import dynamic from "next/dynamic";
-import AutocompleteInputOSM from "@/components/AutocompleteInputOSM";
 import { usePricing } from "@/lib/usePricing";
 import { calculateFare, formatIDR } from "@/lib/fare";
+import { osmReverseGeocode } from "@/lib/osm";
+import type { Merchant } from "@/types/merchant";
 import type { LatLng } from "@/types/merchant";
-import { Route, Clock, MapPin, Bike } from "lucide-react";
 
 const OSMMapView = dynamic(() => import("@/components/OSMMapView"), {
   ssr: false,
 });
 
 export default function CheckoutPage() {
-  const params = useSearchParams();
-  const merchantId = params.get("merchant") || "";
   const router = useRouter();
+  const sp = useSearchParams();
+  const merchantId = sp.get("merchant") || "";
+
   const { cart, clear, subtotal } = useCart(merchantId);
+  const {
+    pricing,
+    loading: pricingLoading,
+    error: pricingError,
+  } = usePricing();
 
-  const [m, setM] = useState<Merchant | null>(null);
-  const [destAddr, setDestAddr] = useState("");
-  const [destCoords, setDestCoords] = useState<LatLng | null>(null);
-
+  const [merchant, setMerchant] = useState<Merchant | null>(null);
+  const [dropAddress, setDropAddress] = useState("");
+  const [dropCoords, setDropCoords] = useState<LatLng | null>(null);
   const [routeInfo, setRouteInfo] = useState<{
     distanceText: string;
     durationText: string;
     distanceValue: number;
     durationValue: number;
   } | null>(null);
-  const { pricing } = usePricing();
+  const [mErr, setMErr] = useState<string | null>(null);
 
   useEffect(() => {
     if (!merchantId) return;
     (async () => {
-      const snap = await getDoc(doc(db, "merchants", merchantId));
-      if (snap.exists()) setM({ id: snap.id, ...(snap.data() as any) });
+      try {
+        const snap = await getDoc(doc(db, "merchants", merchantId));
+        if (snap.exists()) {
+          setMerchant({ id: snap.id, ...(snap.data() as any) });
+        } else {
+          setMErr("Merchant tidak ditemukan.");
+        }
+      } catch (err: any) {
+        setMErr(String(err?.message || err));
+      }
     })();
   }, [merchantId]);
 
-  const deliveryFare = useMemo(() => {
+  useEffect(() => {
+    // prefill with current geolocation
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        try {
+          const addr = await osmReverseGeocode(coords);
+          setDropAddress(addr);
+          setDropCoords(coords);
+        } catch {
+          setDropAddress(
+            `(${coords.lat.toFixed(5)}, ${coords.lng.toFixed(5)})`
+          );
+          setDropCoords(coords);
+        }
+      },
+      () => {},
+      { enableHighAccuracy: true, maximumAge: 10_000, timeout: 10_000 }
+    );
+  }, []);
+
+  const deliveryFee = useMemo(() => {
     if (!pricing || !routeInfo) return null;
-    const mult = pricing.vehicleMultipliers?.bike ?? 1; // default kurir motor
-    const overrides = {
+    const override = {
       ...pricing,
-      baseFare: Math.round(pricing.baseFare * mult),
-      perKm: pricing.perKm * mult,
-      perMin: pricing.perMin * mult,
-      minFare: Math.round(pricing.minFare * mult),
+      baseFare: Math.round(
+        pricing.baseFare * (pricing.vehicleMultipliers?.bike ?? 1)
+      ),
+      perKm: pricing.perKm * (pricing.vehicleMultipliers?.bike ?? 1),
+      perMin: pricing.perMin * (pricing.vehicleMultipliers?.bike ?? 1),
+      minFare: Math.round(
+        pricing.minFare * (pricing.vehicleMultipliers?.bike ?? 1)
+      ),
     };
     return calculateFare(
       routeInfo.distanceValue,
       routeInfo.durationValue,
-      overrides
+      override
     );
   }, [pricing, routeInfo]);
 
-  async function placeOrder() {
-    if (!m?.coords) return alert("Merchant belum punya koordinat.");
-    if (!destCoords || !routeInfo || !deliveryFare)
-      return alert("Lengkapi tujuan & rute.");
+  const grandTotal = useMemo(() => {
+    const fee = deliveryFee?.total ?? 0;
+    return subtotal + fee;
+  }, [subtotal, deliveryFee]);
 
-    const uid = auth.currentUser?.uid;
-    if (!uid) return alert("Sesi Firebase tidak aktif.");
-
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!auth.currentUser?.uid) {
+      alert("Anda belum login.");
+      return;
+    }
+    if (!merchant?.coords) {
+      alert("Merchant tidak memiliki lokasi pickup.");
+      return;
+    }
+    if (!dropCoords) {
+      alert("Silakan pilih alamat pengantaran.");
+      return;
+    }
+    if (!routeInfo || !deliveryFee) {
+      alert("Rute atau ongkos kirim belum siap.");
+      return;
+    }
     const payload = {
       service: "merchant",
       status: "searching",
       createdAt: serverTimestamp(),
-      customer: { uid },
-      merchant: {
-        id: m.id,
-        name: m.name,
-        coords: m.coords,
-        address: m.address ?? null,
+      pickup: {
+        address: merchant.address || merchant.name || "Merchant",
+        coords: merchant.coords,
       },
-      cart: cart.items.map((x) => ({
-        id: x.id,
-        name: x.name,
-        price: x.price,
-        qty: x.qty,
+      destinations: [{ address: dropAddress, coords: dropCoords }],
+      route: {
+        distanceText: routeInfo.distanceText,
+        durationText: routeInfo.durationText,
+        distanceValue: routeInfo.distanceValue,
+        durationValue: routeInfo.durationValue,
+      },
+      fare: {
+        currency: "IDR",
+        total: deliveryFee.total,
+        baseFare: deliveryFee.baseFare,
+        distanceFare: deliveryFee.distanceFare,
+        timeFare: deliveryFee.timeFare,
+        bookingFee: deliveryFee.bookingFee,
+        surgeMultiplier: deliveryFee.surgeMultiplier,
+      },
+      items: cart.items.map((it) => ({
+        id: it.id,
+        name: it.name,
+        price: it.price,
+        qty: it.qty,
       })),
-      totals: {
-        items: subtotal,
-        delivery: deliveryFare.total,
-        grand: subtotal + deliveryFare.total,
+      subtotal,
+      grandTotal,
+      customer: {
+        uid: auth.currentUser.uid,
+        name: auth.currentUser.displayName || null,
+        email: auth.currentUser.email || null,
       },
-      pickup: { address: m.address ?? null, coords: m.coords },
-      destinations: [{ address: destAddr, coords: destCoords }],
-      route: routeInfo,
-      pricingSnapshot: pricing ?? null,
       driver: null,
     };
 
-    const ref = await addDoc(collection(db, "orders"), payload as any);
+    const ref = await addDoc(collection(db, "orders"), payload);
+
+    // call /api/match-driver to assign nearest driver (if needed)
+    try {
+      await fetch("/api/match-driver", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderId: ref.id }),
+      });
+    } catch (err) {
+      // not fatal
+    }
     clear();
     router.push(`/customer/order/${ref.id}`);
   }
@@ -113,81 +188,91 @@ export default function CheckoutPage() {
     <div className="flex flex-col md:flex-row min-h-screen bg-gray-50">
       <SidebarCustomer />
       <main className="flex-1 p-6 pt-20 md:pt-6 md:ml-64">
-        <h1 className="text-2xl font-bold mb-4">Checkout</h1>
+        <h1 className="text-2xl font-bold">Checkout</h1>
+        {mErr && <div className="text-red-600 text-sm">{mErr}</div>}
+        <div className="grid lg:grid-cols-3 gap-6">
+          {/* ringkasan keranjang */}
+          <div className="lg:col-span-2 bg-white border rounded-lg p-4">
+            <h2 className="font-semibold mb-2">Ringkasan Pesanan</h2>
+            {cart.items.map((it) => (
+              <p key={it.id} className="flex justify-between text-sm">
+                <span>
+                  {it.name} × {it.qty}
+                </span>
+                <span>{formatIDR(it.price * it.qty)}</span>
+              </p>
+            ))}
+            <hr className="my-2" />
+            <p className="font-semibold text-sm flex justify-between">
+              <span>Subtotal</span>
+              <span>{formatIDR(subtotal)}</span>
+            </p>
+          </div>
 
-        {!m ? (
-          <div className="bg-white border rounded-lg p-4">Memuat merchant…</div>
-        ) : (
-          <>
-            <div className="grid lg:grid-cols-3 gap-6">
-              <div className="lg:col-span-2 bg-white rounded-xl border p-4">
-                <div className="text-sm font-semibold mb-2">Alamat Tujuan</div>
-                <AutocompleteInputOSM
-                  value={destAddr}
-                  onChangeText={setDestAddr}
-                  placeholder="Masukkan alamat pengantaran"
-                  icon={<MapPin className="w-4 h-4" />}
-                  onPlaceSelected={({ address, lat, lng }) => {
-                    setDestAddr(address);
-                    setDestCoords({ lat, lng });
-                  }}
-                />
-
-                <div className="mt-3 rounded overflow-hidden border">
-                  <OSMMapView
-                    variant="streets"
-                    center={
-                      destCoords || m.coords || { lat: -1.25, lng: 124.45 }
-                    }
-                    pickup={m.coords || null}
-                    waypoints={[destCoords]}
-                    drawRoute={Boolean(m.coords && destCoords)}
-                    onWaypointDrag={(_, c) => setDestCoords(c)}
-                    onRouteComputed={(info) => setRouteInfo(info)}
-                    height={360}
-                  />
-                </div>
-
-                {routeInfo && (
-                  <div className="mt-3 text-sm text-gray-700 flex items-center gap-4">
-                    <span className="inline-flex items-center gap-1">
-                      <Route className="w-4 h-4" />
-                      {routeInfo.distanceText}
-                    </span>
-                    <span className="inline-flex items-center gap-1">
-                      <Clock className="w-4 h-4" />
-                      {routeInfo.durationText}
-                    </span>
-                    <span className="inline-flex items-center gap-1">
-                      <Bike className="w-4 h-4" />
-                      Kurir Motor
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              <div className="bg-white rounded-xl border p-4 h-max">
-                <div className="font-semibold mb-2">Ringkasan</div>
-                <div className="text-sm">Barang: {formatIDR(subtotal)}</div>
-                <div className="text-sm">
-                  Ongkir: {deliveryFare ? formatIDR(deliveryFare.total) : "-"}
-                </div>
-                <div className="text-sm font-semibold mt-1">
-                  Total:{" "}
-                  {deliveryFare
-                    ? formatIDR(subtotal + deliveryFare.total)
-                    : "-"}
-                </div>
-                <button
-                  onClick={placeOrder}
-                  className="mt-3 w-full px-3 py-2 rounded-md bg-emerald-600 text-white text-sm hover:bg-emerald-700"
-                >
-                  Buat Pesanan
-                </button>
-              </div>
+          {/* panel lokasi & ongkir */}
+          <div className="bg-white border rounded-lg p-4">
+            <h2 className="font-semibold mb-2">Pengantaran</h2>
+            <p className="text-sm">Alamat Pengantaran</p>
+            <input
+              className="w-full border rounded-md p-2 text-sm mt-1"
+              value={dropAddress}
+              onChange={(e) => setDropAddress(e.target.value)}
+              placeholder="Cari alamat atau klik pada peta"
+            />
+            <div className="mt-3 border rounded h-56 overflow-hidden">
+              <OSMMapView
+                variant="streets"
+                center={
+                  dropCoords ?? merchant?.coords ?? { lat: -1.25, lng: 124.45 }
+                }
+                pickup={merchant?.coords || null}
+                waypoints={[dropCoords]}
+                onMapClick={(c) => {
+                  osmReverseGeocode(c)
+                    .then((addr) => {
+                      setDropAddress(addr);
+                      setDropCoords(c);
+                    })
+                    .catch(() => {
+                      setDropAddress(
+                        `(${c.lat.toFixed(5)}, ${c.lng.toFixed(5)})`
+                      );
+                      setDropCoords(c);
+                    });
+                }}
+                drawRoute={Boolean(merchant?.coords && dropCoords)}
+                onRouteComputed={(info) => setRouteInfo(info)}
+              />
             </div>
-          </>
-        )}
+            <div className="mt-3 text-sm">
+              {routeInfo && deliveryFee ? (
+                <>
+                  Jarak {routeInfo.distanceText}, waktu {routeInfo.durationText}
+                  <br />
+                  Ongkir: <strong>{formatIDR(deliveryFee.total)}</strong>
+                </>
+              ) : (
+                <span>Pilih alamat pengantaran untuk menghitung ongkir.</span>
+              )}
+            </div>
+            <button
+              onClick={handleSubmit}
+              disabled={
+                cart.items.length === 0 ||
+                !merchant?.coords ||
+                !dropCoords ||
+                !deliveryFee
+              }
+              className={`w-full mt-4 py-2 rounded-md text-white text-sm ${
+                cart.items.length === 0 || !dropCoords || !deliveryFee
+                  ? "bg-gray-300 cursor-not-allowed"
+                  : "bg-green-600 hover:bg-green-700"
+              }`}
+            >
+              Buat Pesanan
+            </button>
+          </div>
+        </div>
       </main>
     </div>
   );

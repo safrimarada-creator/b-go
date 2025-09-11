@@ -43,7 +43,7 @@ export default function SidebarCustomer() {
       },
       { href: "/customer/laundry", label: "Laundry", icon: WashingMachine },
       { href: "/customer/delivery", label: "Kirim Barang", icon: Package },
-      { href: "/customer/orders", label: "Pesanan Saya", icon: ClipboardList }, // opsional
+      { href: "/customer/order", label: "Pesanan Saya", icon: ClipboardList }, // opsional
       { href: "/customer/notifications", label: "Notifikasi", icon: Bell }, // opsional
       { href: "/customer/settings", label: "Pengaturan", icon: Settings }, // opsional
     ],

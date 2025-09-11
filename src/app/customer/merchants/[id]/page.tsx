@@ -1,4 +1,3 @@
-// src/app/customer/merchants/[id]/page.tsx
 "use client";
 
 import { useEffect, useState } from "react";
@@ -33,7 +32,10 @@ type Product = {
 };
 
 export default function MerchantDetailPage() {
-  const { id } = useParams<{ id: string }>();
+  const params = useParams<{ id: string }>();
+  // Pastikan id adalah string yang stabil
+  const id = typeof params?.id === "string" ? params.id : undefined;
+
   const router = useRouter();
 
   const [merchant, setMerchant] = useState<Merchant | null>(null);
@@ -42,7 +44,15 @@ export default function MerchantDetailPage() {
   const [err, setErr] = useState<string | null>(null);
   const [idxWarn, setIdxWarn] = useState(false);
 
-  const { cart, add, subtotal } = useCart(id);
+  // ✅ gunakan ready dari useCart supaya tidak balapan saat kunci belum siap
+  const { cart, add, subtotal, ready, saveNow } = useCart(id);
+
+  // (opsional) Set "merchant terakhir" seawal mungkin sebagai fallback checkout
+  useEffect(() => {
+    if (id && typeof window !== "undefined") {
+      localStorage.setItem("cart:lastMerchant", id);
+    }
+  }, [id]);
 
   // Ambil info merchant sekali
   useEffect(() => {
@@ -73,12 +83,11 @@ export default function MerchantDetailPage() {
       unsub = onSnapshot(
         qRef,
         (snap: QuerySnapshot<DocumentData>) => {
-          // map & sort client jika fallback (tanpa orderBy)
           const arr = snap.docs.map((d) => ({
             id: d.id,
             ...(d.data() as Product),
           }));
-          // jika tidak di-orderBy di server, urutkan di client pakai createdAt desc
+          // urutkan createdAt desc di client
           arr.sort((a, b) => {
             const ta = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : 0;
             const tb = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : 0;
@@ -88,7 +97,7 @@ export default function MerchantDetailPage() {
           setLoading(false);
         },
         (e: any) => {
-          // Jika butuh index → fallback tanpa orderBy
+          // Fallback tanpa orderBy bila index belum ada
           if (e?.code === "failed-precondition" && !isFallback) {
             setIdxWarn(true);
             if (unsub) unsub();
@@ -106,7 +115,6 @@ export default function MerchantDetailPage() {
       );
     };
 
-    // Query utama (butuh index): merchantId ==, isActive ==, orderBy createdAt desc
     const q1 = query(
       ref,
       where("merchantId", "==", id),
@@ -119,6 +127,21 @@ export default function MerchantDetailPage() {
       if (unsub) unsub();
     };
   }, [id]);
+
+  // Handler checkout yang aman (tidak lanjut kalau belum siap / kosong)
+  function goCheckout() {
+    if (!id) return;
+    if (!ready) return;
+    saveNow();
+    // if (!ready) {
+    //   alert("Keranjang belum siap. Mohon tunggu sebentar…");
+    //   return;
+    // }
+    if (cart.items.length === 0) {
+      alert("Keranjang Anda masih kosong.");
+      return;
+    }
+  }
 
   return (
     <div className="flex flex-col md:flex-row min-h-screen bg-gray-50">
@@ -135,9 +158,8 @@ export default function MerchantDetailPage() {
         {idxWarn && (
           <div className="mt-3 mb-4 text-[12px] px-3 py-2 rounded border border-amber-300 bg-amber-50 text-amber-800">
             Query produk berjalan tanpa <b>orderBy</b> karena index belum
-            dibuat. Buka halaman error Firestore dan buat index komposit untuk
-            koleksi
-            <code className="mx-1">products</code> dengan fields:
+            dibuat. Buat index komposit untuk koleksi{" "}
+            <code className="mx-1">products</code>:
             <b className="mx-1">
               merchantId (Asc), isActive (Asc), createdAt (Desc)
             </b>
@@ -179,10 +201,21 @@ export default function MerchantDetailPage() {
                         {formatIDR(p.price)}
                       </div>
                       <button
+                        type="button"
+                        disabled={!ready || !id}
                         onClick={() =>
                           add({ id: p.id!, name: p.name, price: p.price }, 1)
                         }
-                        className="mt-2 px-3 py-2 rounded-md bg-emerald-600 text-white text-sm hover:bg-emerald-700"
+                        className={`mt-2 px-3 py-2 rounded-md text-white text-sm ${
+                          !ready || !id
+                            ? "bg-gray-300 cursor-not-allowed"
+                            : "bg-emerald-600 hover:bg-emerald-700"
+                        }`}
+                        title={
+                          !ready
+                            ? "Keranjang belum siap"
+                            : "Tambah ke keranjang"
+                        }
                       >
                         Tambah
                       </button>
@@ -195,7 +228,11 @@ export default function MerchantDetailPage() {
             {/* Cart */}
             <div className="bg-white rounded-xl border p-4 h-max">
               <div className="font-semibold mb-2">Keranjang</div>
-              {cart.items.length === 0 ? (
+              {!ready ? (
+                <div className="text-sm text-gray-600">
+                  Menyiapkan keranjang…
+                </div>
+              ) : cart.items.length === 0 ? (
                 <div className="text-sm text-gray-600">Belum ada item.</div>
               ) : (
                 <>
@@ -215,10 +252,31 @@ export default function MerchantDetailPage() {
                   <div className="mt-2 text-sm font-semibold">
                     Subtotal: {formatIDR(subtotal)}
                   </div>
-                  <button
-                    onClick={() =>
-                      router.push(`/customer/checkout?merchant=${id}`)
+
+                  {/* <button
+                    type="button"
+                    onClick={goCheckout}
+                    disabled={!ready || cart.items.length === 0}
+                    className={`mt-3 w-full px-3 py-2 rounded-md text-white text-sm ${
+                      !ready || cart.items.length === 0
+                        ? "bg-gray-300 cursor-not-allowed"
+                        : "bg-blue-600 hover:bg-blue-700"
+                    }`}
+                    title={
+                      !ready
+                        ? "Keranjang belum siap"
+                        : cart.items.length === 0
+                        ? "Keranjang kosong"
+                        : "Lanjut ke Checkout"
                     }
+                  >
+                    Lanjut ke Checkout
+                  </button> */}
+                  <button
+                    onClick={() => {
+                      saveNow();
+                      router.push(`/customer/checkout?merchant=${id}`);
+                    }}
                     className="mt-3 w-full px-3 py-2 rounded-md bg-blue-600 text-white text-sm hover:bg-blue-700"
                   >
                     Lanjut ke Checkout
