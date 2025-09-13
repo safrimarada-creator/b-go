@@ -33,26 +33,40 @@ const DriverIcons: Record<"bike" | "car2" | "car3", L.Icon> = {
   }),
 };
 
+/* 🔧 Tambahkan helper normalisasi */
+function toVehicleIconKey(v?: unknown): "bike" | "car2" | "car3" {
+  return v === "car2" || v === "car3" ? v : "bike";
+}
+
 /* =================== Pin SVG Berwarna =================== */
 function makePin(color: string, label?: string) {
   const html = `
   <svg width="36" height="36" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-    <!-- badan pin -->
     <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"
       fill="${color}" stroke="white" stroke-width="2"/>
-    <!-- lingkaran tengah -->
     <circle cx="12" cy="9" r="4" fill="white"/>
     ${
-      label
-        ? `<text x="12" y="10.5" text-anchor="middle" font-size="7" font-weight="700" fill="#111827">${label}</text>`
-        : ""
+      label ? (
+        <text
+          x="12"
+          y="10.5"
+          text-anchor="middle"
+          font-size="7"
+          font-weight="700"
+          fill="#111827"
+        >
+          ${label}
+        </text>
+      ) : (
+        ""
+      )
     }
   </svg>`;
   return L.divIcon({
     className: "bgo-pin",
     html,
     iconSize: [36, 36],
-    iconAnchor: [18, 36], // ujung pin tepat di titik koordinat
+    iconAnchor: [18, 36],
     popupAnchor: [0, -32],
   });
 }
@@ -61,33 +75,22 @@ function makePin(color: string, label?: string) {
 type Props = {
   variant?: "streets" | "satellite";
   center: LatLng;
-
-  // pickup & waypoint
   pickup?: LatLng | null;
   waypoints?: (LatLng | null)[];
   drawRoute?: boolean;
-
-  // driver (opsional)
   driverMarker?: LatLng | null;
-  driverVehicle?: "bike" | "car2" | "car3";
-
-  // interaksi
+  driverVehicle?: "bike" | "car2" | "car3" | string; // 🔧 izinkan string lain (mis. "any")
   onMapClick?: (coords: LatLng) => void;
   onPickupDrag?: (coords: LatLng) => void;
   onWaypointDrag?: (index: number, coords: LatLng) => void;
-
-  // warna pin (opsional)
-  pickupPinColor?: string; // default hijau
-  destPinColor?: string; // default merah
-
-  // info rute (opsional)
+  pickupPinColor?: string;
+  destPinColor?: string;
   onRouteComputed?: (info: {
     distanceText: string;
     durationText: string;
     distanceValue: number;
     durationValue: number;
   }) => void;
-
   height?: number;
 };
 
@@ -208,13 +211,12 @@ export default function OSMMapView({
   onPickupDrag,
   onWaypointDrag,
   onRouteComputed,
-  pickupPinColor = "#10B981", // emerald-500
-  destPinColor = "#EF4444", // red-500
+  pickupPinColor = "#10B981",
+  destPinColor = "#EF4444",
   height = 320,
 }: Props) {
   const [routeLine, setRouteLine] = useState<LatLng[] | null>(null);
 
-  // icons
   const pickupIcon = useMemo(
     () => makePin(pickupPinColor, "P"),
     [pickupPinColor]
@@ -222,6 +224,12 @@ export default function OSMMapView({
   const destIconFor = useMemo(
     () => (i: number) => makePin(destPinColor, String(i + 1)),
     [destPinColor]
+  );
+
+  /* 🔧 Normalisasi ikon driver di sini */
+  const driverIcon = useMemo(
+    () => DriverIcons[toVehicleIconKey(driverVehicle)],
+    [driverVehicle]
   );
 
   // hitung rute via OSRM
@@ -313,9 +321,9 @@ export default function OSMMapView({
         {driverMarker && (
           <Marker
             position={[driverMarker.lat, driverMarker.lng]}
-            icon={DriverIcons[driverVehicle]}
+            icon={driverIcon}
+            // {/* 🔧 pakai ikon yang sudah dinormalisasi */}
             title="Driver"
-            // zIndexOffset lebih tinggi dari pin tujuan
             zIndexOffset={600}
           />
         )}

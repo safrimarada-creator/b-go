@@ -15,3 +15,4 @@ const app =
 
 export const adminAuth = getAuth(app);
 export const adminDb = getFirestore(app);
+

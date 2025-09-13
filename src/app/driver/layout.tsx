@@ -10,16 +10,16 @@ export default function DriverLayout({
   return (
     <div className="flex">
       {/* SidebarDriver kamu di sini */}
-      <div className="p-2">
-        <button
-          onClick={() => setOnline(!online)}
-          className={`px-3 py-1 rounded ${
-            online ? "bg-emerald-600 text-white" : "bg-gray-200"
-          }`}
-        >
-          {online ? "Online" : "Offline"}
-        </button>
-      </div>
+      {/* <div className="p-2"> */}
+      {/* <button
+        onClick={() => setOnline(!online)}
+        className={`px-3 py-1 rounded ${
+          online ? "bg-emerald-600 text-white" : "bg-gray-200"
+        }`}
+      >
+        {online ? "Online" : "Offline"}
+      </button> */}
+      {/* </div> */}
       <div className="flex-1">{children}</div>
     </div>
   );

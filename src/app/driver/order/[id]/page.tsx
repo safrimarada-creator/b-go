@@ -1,3 +1,4 @@
+// src/app/driver/order/[id]/page.tsx
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -32,6 +33,7 @@ const OSMMapView = dynamic(() => import("@/components/OSMMapView"), {
   ssr: false,
 });
 
+/* ---------------- Auth siap dulu (hindari rules denial) ---------------- */
 function useAuthReady() {
   const [ready, setReady] = useState(false);
   useEffect(() => {
@@ -41,11 +43,13 @@ function useAuthReady() {
   return ready;
 }
 
+/* ---------------- Type guard: ada field rute ---------------- */
 function hasRouteFields(o: OrderDoc | null | undefined): o is OrderDoc & {
   pickup?: { address?: string; coords?: LatLng | null };
   destinations?: Array<{ address?: string; coords?: LatLng | null }>;
   route?: { distanceText?: string; durationText?: string };
-  vehicleType?: VehicleType;
+  // note: vehicleType di DB bisa "any", jadi jangan batasi ke VehicleType saja
+  vehicleType?: VehicleType | string;
 } {
   if (!o) return false;
   const p = (o as any).pickup;
@@ -53,11 +57,25 @@ function hasRouteFields(o: OrderDoc | null | undefined): o is OrderDoc & {
   return !!p?.coords && Array.isArray(ds) && ds.length > 0;
 }
 
+/* ---------------- Normalisasi tipe kendaraan untuk ikon & validasi ---------------- */
+type VehicleIconKey = "bike" | "car2" | "car3"; // ikon yang tersedia
+type VehicleRequested = VehicleIconKey | "any"; // permintaan order bisa "any"
+
+/** Pastikan value cocok ke ikon yang ada (default "bike") */
+function toVehicleIconKey(v?: unknown): VehicleIconKey {
+  return v === "car2" || v === "car3" ? v : "bike";
+}
+
+/** Normalisasi request kendaraan dari dokumen order (bisa "any") */
+function toVehicleRequested(v?: unknown): VehicleRequested {
+  return v === "car2" || v === "car3" || v === "bike" ? v : "any";
+}
+
 export default function DriverOrderDetailPage() {
   const { id } = useParams<{ id: string }>();
   const authReady = useAuthReady();
 
-  const { profile: driverProfile } = useDriverProfile(); // { vehicleType, ... }
+  const { profile: driverProfile } = useDriverProfile();
   const { myLoc } = useDriverPresence();
 
   const [order, setOrder] = useState<OrderDoc | null>(null);
@@ -97,8 +115,14 @@ export default function DriverOrderDetailPage() {
 
   const canDrawRoute = Boolean(pickupCoords && waypoints.some(Boolean));
 
-  const vehicle: VehicleType =
-    (hasRouteFields(order) && (order.vehicleType as VehicleType)) || "bike";
+  // Ikon untuk marker driver di peta:
+  // 1) utamakan kendaraan driver dari profil (real)
+  // 2) kalau belum ada, coba dari order
+  // 3) fallback "bike"
+  const vehicleForIcon: VehicleIconKey = toVehicleIconKey(
+    driverProfile?.vehicleType ??
+      (hasRouteFields(order) ? (order as any).vehicleType : undefined)
+  );
 
   const routeDistanceText = hasRouteFields(order)
     ? order.route?.distanceText || "-"
@@ -118,7 +142,7 @@ export default function DriverOrderDetailPage() {
   const iAmAssigned =
     myUid && order?.driver?.uid && order.driver.uid === myUid ? true : false;
 
-  // Accept (transaction + cek vehicleType)
+  /* ---------------- Ambil order (cek tipe kendaraan) ---------------- */
   async function acceptOrder() {
     if (!id) return;
     if (!auth.currentUser?.uid) {
@@ -137,11 +161,15 @@ export default function DriverOrderDetailPage() {
           throw new Error("Order sudah tidak tersedia.");
         }
 
-        const driverV: VehicleType = driverProfile?.vehicleType || "bike";
-        const orderV: VehicleType =
-          (hasRouteFields(data) && (data.vehicleType as VehicleType)) || "bike";
+        const driverV: VehicleIconKey = toVehicleIconKey(
+          driverProfile?.vehicleType
+        );
+        const orderV: VehicleRequested = hasRouteFields(data)
+          ? toVehicleRequested((data as any).vehicleType)
+          : "any";
 
-        if (hasRouteFields(data) && orderV !== driverV) {
+        // Jika order spesifik, harus cocok dengan kendaraan driver.
+        if (orderV !== "any" && orderV !== driverV) {
           throw new Error(
             `Tipe kendaraan tidak cocok (order: ${orderV}, Anda: ${driverV})`
           );
@@ -171,7 +199,7 @@ export default function DriverOrderDetailPage() {
     }
   }
 
-  // Mirror lokasi driver → orders/{id}.driver.coords
+  /* ---------------- Mirror posisi driver ke dokumen order ---------------- */
   const lastMirrorRef = useRef(0);
   useEffect(() => {
     if (!id || !myLoc || !order) return;
@@ -196,7 +224,7 @@ export default function DriverOrderDetailPage() {
     });
   }, [id, myLoc, order, iAmAssigned, myUid]);
 
-  // Progress status
+  /* ---------------- Progress status ---------------- */
   async function goTo(next: "driver_arriving" | "ongoing" | "completed") {
     if (!id || !order) return;
     if (!iAmAssigned) {
@@ -316,7 +344,7 @@ export default function DriverOrderDetailPage() {
             waypoints={waypoints}
             drawRoute={canDrawRoute}
             driverMarker={order?.driver?.coords || myLoc || null}
-            driverVehicle={vehicle}
+            driverVehicle={vehicleForIcon} // <- sudah dinormalisasi & selalu valid
           />
         </div>
 

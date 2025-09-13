@@ -15,7 +15,7 @@ export default function DriverDashboardPage() {
   const { online, setOnline, myLoc } = useDriverPresence();
 
   return (
-    <div className="flex flex-col md:flex-row min-h-screen bg-gray-50">
+    <div className="flex flex-col md:flex-row ">
       <SidebarDriver />
 
       <main className="flex-1 p-6 pt-20 md:pt-6 md:ml-64">

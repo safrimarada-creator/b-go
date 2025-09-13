@@ -1,108 +1,169 @@
-import { NextRequest, NextResponse } from "next/server";
-import { adminDb, AdminTimestamp } from "@/lib/firebase-server";
-import type { DriverLocationDoc } from "@/types/driver";
-
+// src/app/api/match-driver/route.ts
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-// Calculate meters using Haversine
-function haversine(
-  a: { lat: number; lng: number },
-  b: { lat: number; lng: number }
-) {
+import { NextResponse } from "next/server";
+import { adminDb, adminAuth } from "@/lib/firebaseAdmin";
+import { FieldValue } from "firebase-admin/firestore";
+
+type LatLng = { lat: number; lng: number };
+
+function distMeters(a: LatLng, b: LatLng) {
+  const R = 6371000;
   const toRad = (x: number) => (x * Math.PI) / 180;
-  const R = 6371e3;
   const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lng - a.lng);
-  const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const la1 = toRad(a.lat);
+  const la2 = toRad(b.lat);
   const s =
     Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
-  const c = 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
-  return R * c;
+    Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
 }
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    const { orderId } = (await req.json()) as { orderId: string };
+    // ---- Auth (ID token dari klien) ----
+    const authz =
+      req.headers.get("authorization") || req.headers.get("Authorization");
+    if (!authz?.startsWith("Bearer ")) {
+      return NextResponse.json(
+        { ok: false, error: "Missing Authorization Bearer <ID_TOKEN>." },
+        { status: 401 }
+      );
+    }
+    const idToken = authz.slice(7);
+    const decoded = await adminAuth.verifyIdToken(idToken).catch(() => null);
+
+    // ---- Body ----
+    const body = await req.json().catch(() => ({}));
+    const orderId: string | undefined = body?.orderId;
+    const maxKm: number = typeof body?.maxKm === "number" ? body.maxKm : 15;
     if (!orderId) {
       return NextResponse.json(
-        { error: "orderId is required" },
+        { ok: false, error: "orderId wajib" },
         { status: 400 }
       );
     }
 
-    // Get order & pickup coords
-    const orderRef = adminDb.collection("orders").doc(orderId);
-    const orderSnap = await orderRef.get();
-    if (!orderSnap.exists) {
-      return NextResponse.json({ error: "Order not found" }, { status: 404 });
-    }
-    const orderData = orderSnap.data() as any;
-    const pickup = orderData?.pickup?.coords;
-    if (!pickup) {
+    // ---- Ambil order ----
+    const oref = adminDb.collection("orders").doc(orderId);
+    const osnap = await oref.get();
+    if (!osnap.exists) {
       return NextResponse.json(
-        { error: "Order missing pickup coords" },
-        { status: 400 }
+        { ok: false, error: "Order tidak ditemukan" },
+        { status: 404 }
+      );
+    }
+    const order: any = osnap.data() || {};
+
+    // Opsional: hanya pemilik order yang boleh memanggil
+    if (decoded && order?.customer?.uid && decoded.uid !== order.customer.uid) {
+      return NextResponse.json(
+        { ok: false, error: "Forbidden" },
+        { status: 403 }
       );
     }
 
-    // Read online drivers
-    const driversSnap = await adminDb
+    // Titik pickup (wajib)
+    const pickup: LatLng | null =
+      order?.pickup?.coords || order?.merchant?.coords || null;
+
+    if (!pickup) {
+      await oref
+        .update({
+          candidateUids: [],
+          candidates: [],
+          candidatesUpdatedAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        })
+        .catch(() => {});
+      return NextResponse.json({
+        ok: true,
+        candidates: [],
+        maxKm,
+        debug: { reason: "no_pickup_coords" },
+      });
+    }
+
+    // ---- Ambil driver online terbaru ----
+    // Catatan: kita TIDAK pakai where("isOnline", true) karena sebagian dokumen pakai "online".
+    // Kita ambil terbaru by updatedAt lalu filter in-memory.
+    const dsnap = await adminDb
       .collection("driverLocations")
-      .where("online", "==", true)
-      .limit(200)
+      .orderBy("updatedAt", "desc")
+      .limit(500)
       .get();
 
-    const candidates: (DriverLocationDoc & { distance: number })[] =
-      driversSnap.docs
-        .map((d) => {
-          const data = d.data() as DriverLocationDoc;
-          return { ...data, id: d.id };
-        })
-        .filter((d) => d.coords)
-        .map((d) => ({
-          ...d,
-          distance: haversine(pickup, d.coords!),
-        }))
-        .sort((a, b) => a.distance - b.distance);
+    const now = Date.now();
+    const vehicleRequired: string | undefined =
+      order?.vehicleType && order.vehicleType !== "any"
+        ? String(order.vehicleType)
+        : undefined;
 
-    if (candidates.length === 0) {
-      return NextResponse.json({ error: "No drivers online" }, { status: 404 });
-    }
+    const all = dsnap.docs
+      .map((d) => {
+        const v = d.data() as any;
+        const coords = v?.coords;
+        const online = v?.isOnline === true || v?.online === true; // <- kompatibel dua nama field
+        const notExpired =
+          !v?.expiresAt ||
+          (typeof v.expiresAt?.toDate === "function" &&
+            v.expiresAt.toDate().getTime() > now);
 
-    const chosen = candidates[0];
+        if (!online || !notExpired) return null;
+        if (
+          !coords ||
+          typeof coords.lat !== "number" ||
+          typeof coords.lng !== "number"
+        )
+          return null;
 
-    // Optionally fetch details from /drivers/{uid}
-    const driverDoc = await adminDb.collection("drivers").doc(chosen.uid).get();
-    const driverInfo: any = driverDoc.exists ? driverDoc.data() : {};
+        const vt = (v?.vehicleType as string) || "bike";
+        if (vehicleRequired && vt !== vehicleRequired) return null;
 
-    await orderRef.update({
-      status: "assigned",
-      assignedAt: AdminTimestamp.now(),
-      updatedAt: AdminTimestamp.now(),
-      driver: {
-        uid: chosen.uid,
-        name: chosen.name ?? driverInfo?.name ?? null,
-        email: chosen.email ?? driverInfo?.email ?? null,
-        coords: chosen.coords,
-        vehicleType: chosen.vehicleType ?? driverInfo?.vehicleType ?? null,
-      },
+        return {
+          uid: d.id,
+          name: v?.name ?? null,
+          vehicleType: vt,
+          distance: distMeters(pickup, coords as LatLng),
+        };
+      })
+      .filter(Boolean) as Array<{
+      uid: string;
+      name?: string | null;
+      vehicleType: string;
+      distance: number;
+    }>;
+
+    const within = all.filter((x) => x.distance <= maxKm * 1000);
+    const ranked = (within.length ? within : all)
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, 30);
+
+    // ---- Tulis kandidat ke order ----
+    await oref.update({
+      candidateUids: ranked.map((x) => x.uid),
+      candidates: ranked,
+      candidatesUpdatedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     });
 
     return NextResponse.json({
       ok: true,
-      chosen: {
-        uid: chosen.uid,
-        distanceMeters: Math.round(chosen.distance),
-        vehicleType: chosen.vehicleType ?? driverInfo?.vehicleType ?? null,
-        name: chosen.name ?? driverInfo?.name ?? null,
+      candidates: ranked,
+      maxKm,
+      debug: {
+        totalFetched: dsnap.size,
+        totalEligible: all.length,
+        withinKm: within.length,
+        pickup,
+        vehicleRequired: vehicleRequired ?? "any",
       },
     });
   } catch (e: any) {
-    console.error(e);
     return NextResponse.json(
-      { error: e.message || String(e) },
+      { ok: false, error: String(e?.message || e) },
       { status: 500 }
     );
   }
